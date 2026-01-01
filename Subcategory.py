@@ -1,57 +1,94 @@
 import sqlite3
 import uuid
-from typing import Optional, List, Dict, Any
-
-from Category import Category
-from ConsoleFormatter import ConsoleFormatter
-
-
-class DatabaseManager:
-    pass
+from datetime import datetime
 
 
 class Subcategory:
-    """Класс для работы с подкатегориями"""
+    """Управление подкатегориями"""
 
-    def __init__(self, db_manager: DatabaseManager):
+    def __init__(self, db_manager):
         self.db = db_manager
-        self.formatter = ConsoleFormatter()
-        self.category_manager = Category(db_manager)
 
-    def create_subcategory(self, category_id: str, name: str):
-        """Создание новой подкатегории"""
+    def create_subcategory(self, category_identifier, name):
+        """Создание подкатегории с автоматическим созданием бюджета"""
         try:
-            # Проверяем, существует ли уже такая подкатегория в этой категории
-            existing = self.get_all_subcategories(category_id)
-            for subcat in existing:
-                if subcat['name'].lower() == name.lower():
-                    self.formatter.print_warning(f"Подкатегория '{name}' уже существует в этой категории!")
-                    return subcat['id']
+            # Ищем категорию по ID или имени
+            category = None
+            if len(category_identifier) == 36:  # UUID
+                query = "SELECT * FROM categories WHERE id = ?"
+                category = self.db.fetch_one(query, (category_identifier,))
+            else:
+                query = "SELECT * FROM categories WHERE name = ?"
+                category = self.db.fetch_one(query, (category_identifier,))
 
-            # Создаем новую подкатегорию
+            if not category:
+                print("❌ Категория не найдена!")
+                return None
+
+            category_id = category[0]
+            category_type = category[2]  # 'income' или 'expense'
+
+            # Проверяем, существует ли уже подкатегория с таким именем в этой категории
+            check_query = "SELECT * FROM subcategories WHERE category_id = ? AND name = ?"
+            existing = self.db.fetch_one(check_query, (category_id, name))
+
+            if existing:
+                print("❌ Подкатегория с таким именем уже существует в этой категории!")
+                return None
+
+            # Создаем подкатегорию
             subcategory_id = str(uuid.uuid4())
-            query = """
-                    INSERT INTO subcategories (id, category_id, name)
-                    VALUES (?, ?, ?) \
-                    """
+            query = "INSERT INTO subcategories (id, category_id, name) VALUES (?, ?, ?)"
             self.db.execute_query(query, (subcategory_id, category_id, name))
-            self.formatter.print_success(f"Подкатегория '{name}' создана успешно! ID: {subcategory_id}")
+
+            print("✅ Подкатегория создана успешно!")
+
+            # Автоматически создаем бюджет по умолчанию для ВСЕХ подкатегорий
+            print("💰 Создаем бюджет по умолчанию...")
+
+            # Находим период "Месяц" по умолчанию
+            period_query = "SELECT id FROM periods WHERE name = 'Месяц'"
+            period_result = self.db.fetch_one(period_query)
+
+            if not period_result:
+                # Если нет периода "Месяц", берем первый доступный
+                period_query = "SELECT id FROM periods LIMIT 1"
+                period_result = self.db.fetch_one(period_query)
+
+            if period_result:
+                period_id = period_result[0]
+                planned_amount = 0.0
+
+                # Получаем коэффициент периода
+                period_count_query = "SELECT period_count FROM periods WHERE id = ?"
+                period_count_result = self.db.fetch_one(period_count_query, (period_id,))
+                period_count = period_count_result[0] if period_count_result else 12
+                year_forecast = planned_amount * period_count
+
+                # Создаем бюджет
+                plan_id = str(uuid.uuid4())
+                budget_query = """
+                               INSERT INTO plan_subcategories
+                               (id, category_id, subcategory_id, period_id, planned_amount, year_forecast)
+                               VALUES (?, ?, ?, ?, ?, ?) \
+                               """
+                self.db.execute_query(budget_query,
+                                      (plan_id, category_id, subcategory_id, period_id, planned_amount, year_forecast))
+                print("✅ Бюджет по умолчанию создан!")
+            else:
+                print("⚠️  Нет доступных периодов для создания бюджета")
+
             return subcategory_id
+
         except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при создании подкатегории: {e}")
+            print(f"❌ Ошибка при создании подкатегории: {e}")
             return None
 
-    def get_all_subcategories(self, category_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Получение всех подкатегорий с опциональной фильтрацией по категории"""
+    # Остальные методы остаются без изменений...
+    def get_all_subcategories(self, category_id=None):
+        """Получение всех подкатегорий"""
         try:
             if category_id:
-                # Проверим, может быть введено имя категории вместо ID
-                category = self.category_manager.get_category_by_id(category_id)
-                if not category:
-                    category = self.category_manager.get_category_by_name(category_id)
-                    if category:
-                        category_id = category['id']
-
                 query = """
                         SELECT s.*, c.name as category_name
                         FROM subcategories s
@@ -72,18 +109,20 @@ class Subcategory:
             subcategories = []
             for row in results:
                 subcategories.append({
-                    'id': row['id'],
-                    'category_id': row['category_id'],
-                    'name': row['name'],
-                    'category_name': row['category_name']
+                    'id': row[0],
+                    'category_id': row[1],
+                    'name': row[2],
+                    'category_name': row[3]
                 })
+
             return subcategories
+
         except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при получении подкатегорий: {e}")
+            print(f"Ошибка при получении подкатегорий: {e}")
             return []
 
-    def get_subcategory_by_id(self, subcategory_id: str) -> Optional[Dict[str, Any]]:
-        """Получение подкатегории по ID"""
+    def get_subcategory_by_id(self, subcategory_id):
+        """Получить подкатегорию по ID"""
         try:
             query = """
                     SELECT s.*, c.name as category_name
@@ -95,163 +134,139 @@ class Subcategory:
 
             if result:
                 return {
-                    'id': result['id'],
-                    'category_id': result['category_id'],
-                    'name': result['name'],
-                    'category_name': result['category_name']
+                    'id': result[0],
+                    'category_id': result[1],
+                    'name': result[2],
+                    'category_name': result[3]
                 }
             return None
+
         except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при получении подкатегории: {e}")
+            print(f"Ошибка при получении подкатегории: {e}")
             return None
 
-    def get_subcategory_by_name(self, name: str, category_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Получение подкатегории по имени"""
-        try:
-            if category_name:
-                query = """
-                        SELECT s.*, c.name as category_name
-                        FROM subcategories s
-                                 JOIN categories c ON s.category_id = c.id
-                        WHERE s.name = ? \
-                          AND c.name = ? \
-                        """
-                result = self.db.fetch_one(query, (name, category_name))
-            else:
-                query = """
-                        SELECT s.*, c.name as category_name
-                        FROM subcategories s
-                                 JOIN categories c ON s.category_id = c.id
-                        WHERE s.name = ? \
-                        """
-                result = self.db.fetch_one(query, (name,))
-
-            if result:
-                return {
-                    'id': result['id'],
-                    'category_id': result['category_id'],
-                    'name': result['name'],
-                    'category_name': result['category_name']
-                }
-            return None
-        except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при получении подкатегории: {e}")
-            return None
-
-    def update_subcategory(self, subcategory_id: str, name: str = None,
-                           category_id: str = None):
+    def update_subcategory(self, identifier):
         """Обновление подкатегории"""
         try:
-            subcategory = self.get_subcategory_by_id(subcategory_id)
+            # Сначала ищем подкатегорию по ID или имени
+            subcategory = None
+            if len(identifier) == 36:  # UUID
+                query = "SELECT * FROM subcategories WHERE id = ?"
+                subcategory = self.db.fetch_one(query, (identifier,))
+            else:
+                # Ищем по имени
+                query = """
+                        SELECT s.*, c.name as category_name
+                        FROM subcategories s
+                                 JOIN categories c ON s.category_id = c.id
+                        WHERE s.name = ? \
+                        """
+                result = self.db.fetch_one(query, (identifier,))
+                if result:
+                    subcategory = result
+
             if not subcategory:
-                # Попробуем найти по имени
-                if subcategory_id and not '-' in subcategory_id:  # Если введено не UUID
-                    # Спросим имя категории
-                    category_name = input("Введите имя категории подкатегории: ").strip()
-                    if category_name:
-                        subcategory = self.get_subcategory_by_name(subcategory_id, category_name)
+                print("❌ Подкатегория не найдена!")
+                return
 
-                if not subcategory:
-                    self.formatter.print_error(f"Подкатегория '{subcategory_id}' не найдена!")
-                    return False
-                else:
-                    subcategory_id = subcategory['id']
+            print(f"\n📝 Обновление подкатегории: {subcategory[2]}")
+            print(f"📂 Категория: {subcategory[1] if len(subcategory) == 3 else subcategory[3]}")
+            print("\nЧто вы хотите обновить?")
+            print("1. Название подкатегории")
+            print("2. Категорию")
+            print("0. Отмена")
 
-            if name is None:
-                name = self.formatter.get_input(
-                    f"Введите новое название подкатегории [{subcategory['name']}]",
-                    required=True,
-                    default=subcategory['name']
-                )
-                if name is None:
-                    return False
+            choice = input("\nВыберите действие (0-2): ").strip()
 
-            if category_id is None:
-                # Показать текущую категорию и спросить о смене
-                self.formatter.print_info(f"Текущая категория: {subcategory['category_name']}")
-                change_cat = input("Изменить категорию? (y/n): ").lower()
-                if change_cat == 'y':
-                    # Показать все категории для выбора
-                    categories = self.category_manager.get_all_categories()
-                    if not categories:
-                        self.formatter.print_warning("Нет доступных категорий!")
-                        return False
+            if choice == '0':
+                print("Отмена обновления.")
+                return
+            elif choice == '1':
+                new_name = input("Введите новое название подкатегории: ").strip()
+                if new_name:
+                    update_query = "UPDATE subcategories SET name = ? WHERE id = ?"
+                    self.db.execute_query(update_query, (new_name, subcategory[0]))
+                    print("✅ Название подкатегории обновлено!")
+            elif choice == '2':
+                # Показываем доступные категории
+                from Category import Category
+                cat_manager = Category(self.db)
+                cat_manager.show_categories_table()
 
-                    self.category_manager.show_categories_table(show_full_ids=True)
+                new_category_id = input("Введите ID новой категории: ").strip()
+                if new_category_id:
+                    update_query = "UPDATE subcategories SET category_id = ? WHERE id = ?"
+                    self.db.execute_query(update_query, (new_category_id, subcategory[0]))
+                    print("✅ Категория подкатегории обновлена!")
+            else:
+                print("❌ Неверный выбор!")
 
-                    cat_choice = self.formatter.get_input(
-                        "Введите ID новой категории",
-                        required=True
-                    )
-                    if cat_choice is None:
-                        return False
-                    category_id = cat_choice
-                else:
-                    category_id = subcategory['category_id']
-
-            query = "UPDATE subcategories SET name = ?, category_id = ? WHERE id = ?"
-            self.db.execute_query(query, (name, category_id, subcategory_id))
-            self.formatter.print_success(f"Подкатегория '{name}' обновлена успешно!")
-            return True
         except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при обновлении подкатегории: {e}")
-            return False
+            print(f"❌ Ошибка при обновлении подкатегории: {e}")
 
-    def delete_subcategory(self, subcategory_id: str):
+    def delete_subcategory(self, identifier):
         """Удаление подкатегории"""
         try:
-            subcategory = self.get_subcategory_by_id(subcategory_id)
+            # Сначала ищем подкатегорию по ID или имени
+            subcategory = None
+            if len(identifier) == 36:  # UUID
+                query = "SELECT * FROM subcategories WHERE id = ?"
+                subcategory = self.db.fetch_one(query, (identifier,))
+            else:
+                # Ищем по имени, может быть несколько с одинаковыми именами
+                print("⚠️  Найдено несколько подкатегорий с таким именем:")
+                query = """
+                        SELECT s.*, c.name as category_name
+                        FROM subcategories s
+                                 JOIN categories c ON s.category_id = c.id
+                        WHERE s.name = ? \
+                        """
+                results = self.db.fetch_all(query, (identifier,))
+
+                if results:
+                    print("\nПодкатегории с именем '{}':".format(identifier))
+                    for i, row in enumerate(results, 1):
+                        print(f"{i}. ID: {row[0][:8]}... | Категория: {row[3]}")
+
+                    choice = input("\nВыберите номер подкатегории для удаления (0 для отмены): ").strip()
+                    try:
+                        choice_idx = int(choice)
+                        if 1 <= choice_idx <= len(results):
+                            subcategory = results[choice_idx - 1]
+                    except ValueError:
+                        print("❌ Неверный выбор!")
+                        return
+
             if not subcategory:
-                # Попробуем найти по имени
-                if subcategory_id and not '-' in subcategory_id:  # Если введено не UUID
-                    # Спросим имя категории
-                    category_name = input("Введите имя категории подкатегории: ").strip()
-                    if category_name:
-                        subcategory = self.get_subcategory_by_name(subcategory_id, category_name)
+                print("❌ Подкатегория не найдена!")
+                return
 
-                if not subcategory:
-                    self.formatter.print_error(f"Подкатегория '{subcategory_id}' не найдена!")
-                    return False
-                else:
-                    subcategory_id = subcategory['id']
+            confirm = input(f"\nВы уверены, что хотите удалить подкатегорию '{subcategory[2]}'? (y/n): ").lower()
+            if confirm == 'y':
+                delete_query = "DELETE FROM subcategories WHERE id = ?"
+                self.db.execute_query(delete_query, (subcategory[0],))
+                print("✅ Подкатегория удалена!")
+            else:
+                print("❌ Удаление отменено.")
 
-            confirm = input(f"Удалить подкатегорию '{subcategory['name']}'? (y/n): ").lower()
-            if confirm != 'y':
-                return False
-
-            query = "DELETE FROM subcategories WHERE id = ?"
-            self.db.execute_query(query, (subcategory_id,))
-            self.formatter.print_success(f"Подкатегория '{subcategory['name']}' удалена успешно!")
-            return True
         except sqlite3.Error as e:
-            self.formatter.print_error(f"Ошибка при удалении подкатегории: {e}")
-            return False
+            print(f"❌ Ошибка при удалении подкатегории: {e}")
 
-    def show_subcategories_table(self, category_id: Optional[str] = None, show_full_ids: bool = False):
-        """Отображение подкатегорий в виде таблицы"""
+    def show_subcategories_table(self, category_id=None, show_full_ids=False):
+        """Отображение таблицы подкатегорий"""
         subcategories = self.get_all_subcategories(category_id)
 
         if not subcategories:
-            if category_id:
-                self.formatter.print_info(f"Подкатегории для выбранной категории не найдены!")
-            else:
-                self.formatter.print_info("Подкатегории не найдены!")
+            print("📭 Подкатегории не найдены")
             return
 
-        headers = ["ID", "Название", "Категория"]
+        headers = ["ID", "Категория", "Название подкатегории"]
         rows = []
 
         for subcat in subcategories:
-            display_id = subcat['id'] if show_full_ids else f"{subcat['id'][:8]}..."
-            rows.append([
-                display_id,
-                subcat['name'],
-                subcat['category_name']
-            ])
+            subcat_id = subcat['id'] if show_full_ids else subcat['id'][:8] + "..."
+            rows.append([subcat_id, subcat['category_name'], subcat['name']])
 
-        title = "Подкатегории"
-        self.formatter.print_table(headers, rows, title, show_full_ids)
-
-        if not show_full_ids:
-            self.formatter.print_info(
-                "ID показаны сокращенно. Для копирования полного ID используйте команду 'Показать полные ID'")
+        from ConsoleFormatter import ConsoleFormatter
+        formatter = ConsoleFormatter()
+        formatter.print_table(headers, rows)
